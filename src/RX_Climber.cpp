@@ -1,34 +1,25 @@
 #include <Arduino.h>
-
-/**
-   Этот файл является частью библиотеки MBee-Arduino.
-   MBee-Arduino является бесплатным программным обеспечением.
-   Подробная информация о лицензиях находится в файле mbee.h.
-   \author </i> von Boduen. Special thanx to Andrew Rapp.
-*/
-
 #include <MBee.h>
 //#include <SoftwareSerial.h>
 #include <PacketSerial.h>
 #include <AltSoftSerial.h>
 #include <avr/wdt.h>
+#include <AT_command_handler.hpp>
 
 // ОПИСАНИЕ ЗАДАЧИ ДОБАВЬ!
-/*   Приёмник сигнала с пульта. Если сигнале нет 0.5 сек - перазгрузка
+/*   Приёмник сигнала с пульта.
      Приём сигнала даёт возможность начать движение самохода через подачу управляющих сигналов на контроллеры ESCON с использованием ШИМ
-     Вперед/Назад/Стоп и получени телеметрии с ESCON'a через АЦП , 4 входа АЦП для 4ех параметров (Скорость и обороты каждого из 2ух двигателей)
-     и отправляет отладочные сообщения на пинах 7 и 8 на PC
+     Вперед/Назад/Стоп и получени телеметрии с ESCON'a через АЦП на борту Atmega328p, 4 входа АЦП для 4ех параметров (Скорость и обороты каждого из 2ух двигателей)
+     и отправляет отладочные сообщения через PacketSerial (or SoftwareSerial) на пинах 7 и 8 на PC
      Отображает светодиодами состояние батареи, направление движения, наличие ошибок, выбор режима связи (радио или провод)
      Отсутствие сигнала приводит к включению звуковой индикации и подаче сигнала СТОП на двигатели при дальнейшем отсутствии сигнала приводит перезагрузке.
 */
 
-// add AnalogPin - as selector
-// add buzzer
-// add
+// add BOOST
 
 
 //For UNO
-#define PC_Debug altSerial         // nss2
+#define PC_Debug altSerial
 #define MBee_Serial Serial
 
 //For MEGA
@@ -130,6 +121,22 @@ int BatteryCharge = 0;
 PacketSerial WireSerial;
 AltSoftSerial altSerial;
 
+void Alarm_ON()
+{
+  AlarmTrigger = true;
+  digitalWrite(BUZZER_PIN, HIGH);
+  digitalWrite(ErrorLed_ADCPin, HIGH);
+}
+
+void Alarm_OFF()
+{
+  AlarmTrigger = false;
+  digitalWrite(BUZZER_PIN, LOW);
+  digitalWrite(ErrorLed_ADCPin, LOW);
+}
+
+
+
 //Обработка прерывания по переполнению счётчика. Должны пищалкой пищать
 //
 // MAIN
@@ -185,20 +192,550 @@ void Reset_Error_Timer_And_Check_WDT()
   //  sei();
 }
 
-void Alarm_ON()
+void Starting_Command_For_Motors()
 {
-  AlarmTrigger = true;
-  digitalWrite(BUZZER_PIN, HIGH);
-  digitalWrite(ErrorLed_ADCPin, HIGH);
+  digitalWrite(Direction_Of_Move, LOW);
+  digitalWrite(Permission_Of_Move, LOW);  // LOW EMERGENCY braking ONLY
+  analogWrite(PWM_Pin, ZeroPWM);
+  //Debug
+  //      PC_Debug.println("|| STOP ||");
+  digitalWrite(ForwardLed, LOW);
+  digitalWrite(BackwardLed, LOW);
+  return;
 }
 
-void Alarm_OFF()
+void Refresh_WireConnectionFlag_RX()
 {
-  AlarmTrigger = false;
-  digitalWrite(BUZZER_PIN, LOW);
-  digitalWrite(ErrorLed_ADCPin, LOW);
+  PC_Debug.println(F("Refresh_WireConnectionFlag_TX!"));
+  bool First_WireConnection_Check = digitalRead(Wire_Connection_Check_Pin);
+  if (WireConnectionFlag_RX != First_WireConnection_Check)
+  {
+    delay(5);
+    bool Second_WireConnection_Check = digitalRead(Wire_Connection_Check_Pin);
+    if (Second_WireConnection_Check == First_WireConnection_Check)
+    {
+      if (Second_WireConnection_Check == true) // WIRE ON
+      {
+        PC_Debug.println("-|- Change to -> Wire connect");
+        WireConnectionFlag_RX = true;
+      }
+      else                                      // WIRE OFF
+      {
+        PC_Debug.println("-))  ((- Change to -> WireLESS connect");
+        WireConnectionFlag_RX = false;
+      }
+    }
+  }
+  return;
 }
 
+void Send_Telemetry( bool WireFlag_RX )
+{
+
+  if (WireFlag_RX == true)
+  {
+    PC_Debug.println("Wire Connect...wait");
+    // No send!
+    WireSerial.send(testArray, sizeof(testArray) / sizeof(testArray[0]) );
+    delay(50);
+  }
+  else
+  {
+    mbee.send(tx);
+    PC_Debug.print("Current_1 ==");
+    PC_Debug.println(Current_1);
+    PC_Debug.print("Speed_1 ==");
+    PC_Debug.println(Speed_1);
+    PC_Debug.print("Current_2 ==");
+    PC_Debug.println(Current_2);
+    PC_Debug.print("Speed_2 ==");
+    PC_Debug.println(Speed_2);
+    PC_Debug.println("RX SEND telemetry.");
+    //  if (tx.getFrameId()) //Проверяем, не заблокировано ли локальное подтверждение отправки.
+    //    getLocalResponse(50);
+    //  if ((tx.getFrameId() == 0) || (txStatus.isSuccess() && tx.getSleepingDevice() == false)) //Ждем ответного пакета от удаленного модема только если локальный ответ выключен или пакет отправлен в эфир и не предназначается спящему модему.
+    //    getRemoteResponse(5);
+    delay(50);
+    return;
+  }
+}
+
+void setArrayForTelemetry() {
+  int Direction = 111;
+  if (SpeedValue_Now == 30 || SpeedValue_Now == -30)
+    Direction = 0; //stop
+  if (SpeedValue_Now > 30)
+    Direction = 5; //rush
+  if (SpeedValue_Now < -30)
+    Direction = 2; //back
+  //set values
+  testArray [0] = CounterOfPacketsFromTx;
+  testArray [1] = Speed_1;       // Speed_1L
+  testArray [2] = Speed_1 >> 8;  // Speed_1H
+  testArray [3] = Speed_2;
+  testArray [4] = Speed_2 >> 8;
+  testArray [5] = Current_1;
+  testArray [6] = Current_1 >> 8;
+  testArray [7] = Current_2;
+  testArray [8] = Current_2 >> 8;
+  testArray [9] = BatteryCharge;               // V_Roper L
+  testArray [10] = BatteryCharge >> 8;         // V_Roper_H
+  testArray [11] = abs(SpeedValue_Now); //PWM_value
+  testArray [12] = Direction;      //Direction
+  //  testArray [13] = Direction;
+  return;
+}
+
+
+//DEBUG feature
+void Debug_information_About_Rx_Packet()
+{
+  PC_Debug.println("---------------------DEBUG------------------");
+  //Print of Received Packet  Length
+  PC_Debug.print("Packet Length -> ");
+  PC_Debug.println(rx.getPacketLength());
+  //Print of MSB Length
+  PC_Debug.print("MSB Lenght -> ");
+  PC_Debug.println(rx.getMsbLength());
+  //Print of LSB Length
+  PC_Debug.print("LSB Lenght -> ");
+  PC_Debug.println(rx.getLsbLength());
+  //Print of API ID
+  PC_Debug.print("API ID -> ");
+  PC_Debug.println(rx.getApiId());
+  // Print Checksum
+  PC_Debug.print("Checksum == ");
+  PC_Debug.println(rx.getChecksum());
+  // Print Frame Data Length
+  PC_Debug.print("Frame Data Lenght -> ");
+  PC_Debug.println(rx.getFrameDataLength());
+  // Print Data Length
+  PC_Debug.print("Data Length -> ");
+  PC_Debug.println(rx.getDataLength());
+  // Print RSSI
+  PC_Debug.print("RSSI -> ");
+  PC_Debug.println(rx.getRssi());
+
+  PC_Debug.println("---------------------DEBUG------------------");
+}
+
+// Debug feature
+void Print_All_Array(int8_t Size, boolean WriteEnable)
+{
+  // ALL PACK PRINT!!
+  for (int i = 0 ; i < Size ; i ++ )
+  {
+    //"PRINT"
+    PC_Debug.print("Input testArray[");
+    PC_Debug.print(i);
+    PC_Debug.print("]= ");
+    PC_Debug.println(rx.getData()[i]);
+    //"WRITE"
+    if (WriteEnable == true)
+    {
+      PC_Debug.print(" WRITE inside i -> ");
+      PC_Debug.write(rx.getData()[i]);
+      PC_Debug.println();
+    }
+  }
+}
+
+// Emergency stop deleted
+//Debug outside
+void Data_Send_To_Processing() {
+  int Garbage = random(-1023, 1023);
+  PC_Debug.print("Speed_1=");
+  PC_Debug.print(Speed_1);
+  PC_Debug.print(" ");
+
+  PC_Debug.print("Speed_2=");
+  PC_Debug.print(Speed_2);
+  PC_Debug.print(" ");
+
+  PC_Debug.print("I_1=");
+  PC_Debug.print(Current_1);
+  PC_Debug.print(" ");
+
+  PC_Debug.print("I_2=");
+  PC_Debug.print(Current_2);
+  PC_Debug.print(" ");
+
+  //  Serial.println(val);
+  PC_Debug.print("Garbage=");
+  PC_Debug.print(Garbage);
+  PC_Debug.print(" ");
+  PC_Debug.println();
+  delay(30);
+  return;
+}
+
+
+// Move
+void Execute_The_Command(int Speed)
+{
+  if (Speed >= Min_SpeedValue && Speed <= Max_SpeedValue)
+  {
+    if (Speed > ZeroPWM) //F
+    {
+      digitalWrite(Direction_Of_Move, HIGH);
+      digitalWrite(Permission_Of_Move, HIGH);
+      analogWrite(PWM_Pin, Speed);
+      //Debug
+      PC_Debug.println("FORWARD --->>>>");
+      //digitalWrite(ForwardLed, HIGH);
+      //digitalWrite(BackwardLed, LOW);
+      digitalWrite(BackwardLed, HIGH);
+    }
+    if (Speed < ZeroPWM) //B
+    {
+      digitalWrite(Direction_Of_Move, LOW);
+      digitalWrite(Permission_Of_Move, HIGH);
+      analogWrite(PWM_Pin, abs(Speed)); // since it is less than 0
+      //Debug
+      PC_Debug.println("<<<<--- BACKWARD");
+      //digitalWrite(ForwardLed, LOW);
+      digitalWrite(BackwardLed, HIGH);
+    }
+    if (Speed == ZeroPWM) //S
+    {
+      if (Release_The_Brakes == false)
+      {
+        digitalWrite(Direction_Of_Move, LOW);
+        digitalWrite(Permission_Of_Move, HIGH);  // HIGH for normal braking
+        analogWrite(PWM_Pin, Speed);
+        //Debug
+        //PC_Debug.println("|| STOP ||");
+        //digitalWrite(ForwardLed, LOW);
+        digitalWrite(BackwardLed, LOW);
+      }
+      else
+      {
+        digitalWrite(Direction_Of_Move, LOW);
+        digitalWrite(Permission_Of_Move, LOW);  // LOW EMERGENCY braking ONLY
+        analogWrite(PWM_Pin, Speed);
+        //Debug
+        //PC_Debug.println("|| STOP ||");
+        //digitalWrite(ForwardLed, HIGH);
+        digitalWrite(BackwardLed, HIGH);
+      }
+      if ( SuddenReverse == true);
+      {
+        SuddenReverse = false;
+      }
+    }
+    digitalWrite(ForwardLed, LOW);  // expected data
+  }
+  else
+  {
+    // STOP RIGHT NOW
+    digitalWrite(Direction_Of_Move, LOW);
+    digitalWrite(Permission_Of_Move, LOW);
+    analogWrite(PWM_Pin, ZeroPWM);
+    SpeedValue_Now = ZeroPWM;
+    Step_For_Move = 0;
+    //Debug
+    PC_Debug.print("Error!!! Speed == ");
+    PC_Debug.println(SpeedValue_Now);
+    //    PC_Debug.println("");
+    //    PC_Debug.print("RESET -> Speed Value_Now = ");
+    //    PC_Debug.println(SpeedValue_Now);
+    //    PC_Debug.println("");
+    //      PC_Debug.println("ERROR from Host (Switcher have bugs or lags) , sadness ");
+    //Debug on LEDs
+    digitalWrite(ForwardLed, HIGH);
+    digitalWrite(BackwardLed, HIGH);
+  }
+}
+
+void Command_To_Motor(int instruction)
+{
+  if (instruction == Corrupted_Command)
+  { //GOTO
+    // NEED ADD REACTION On "ERROR_VALUE"
+    PC_Debug.println(F("Corrupted_Command"));
+  }
+  //KURKUMA
+  if ( (instruction == Forward && SpeedValue_Now < ZeroPWM ) | (instruction == Backward && SpeedValue_Now > ZeroPWM))
+  {
+    instruction = Stop;
+    SuddenReverse = true;
+    PC_Debug.println("Reverse_detected ");
+    PC_Debug.print("instruction - ");
+    PC_Debug.println(instruction);
+    //    delay(3000);
+  }
+  if (instruction == Stop)
+  {
+    if (SpeedValue_Now == ZeroPWM)
+    {
+      Step_For_Move = 0; // command already complete
+    }
+
+    if (SpeedValue_Now > ZeroPWM || SpeedValue_Now < -ZeroPWM )
+    {
+      Step_For_Move = 0; // pull to zero // 1 - FOR TESTS , 7 - for real fights
+      SpeedValue_Now = ZeroPWM;
+    }
+
+    //    if (SpeedValue_Now > ZeroPWM)
+    //    {
+    //      Step_For_Move = -4; // pull to zero // 1 - FOR TESTS , 7 - for real fights
+    //    }
+    //    if (SpeedValue_Now < ZeroPWM)
+    //    {
+    //      Step_For_Move = 4; // pull to zero // 1 - FOR TESTS , 7 - for real fights
+    //    }
+
+    //Calculate
+    SpeedValue_Now = SpeedValue_Now + Step_For_Move;
+    //Teleport
+    if ( ( (SpeedValue_Now <= ZeroPWM) & (SpeedValue_Now >= ZeroPWM - abs(Step_For_Move)) )                       //  (X <= 30) & (X >= 25)
+         | ( (SpeedValue_Now >= (-1) * ZeroPWM) & (SpeedValue_Now <= ( (-1) * ZeroPWM + abs(Step_For_Move)) ) ) ) // ( X >= -30) & ( X <= -25 )
+    {
+      SpeedValue_Now = ZeroPWM;
+      Step_For_Move = 0;  // command complete
+      //PC_Debug.println("STOP NOW");
+    }
+    //Debug
+    PC_Debug.print("(Stopping)Speed == ");
+    PC_Debug.println(SpeedValue_Now);
+    PC_Debug.println("---------------");
+  }
+  if (instruction == Forward)
+  {
+    if (SpeedValue_Now == Max_SpeedValue) // check for Wished_Speed
+    {
+      //PC_Debug.println("Max Speed is reached! (already)");
+      Step_For_Move = 0;
+    }
+    if (SpeedValue_Now >= Min_SpeedValue && SpeedValue_Now < Max_SpeedValue)
+    {
+      Step_For_Move = 4; //pull to 225 (Max_SpeedValue)
+    }
+    SpeedValue_Now = SpeedValue_Now + Step_For_Move;  // increment or decrement PWM
+    //Teleport
+    if (SpeedValue_Now >= ZeroPWM * (-1) && (SpeedValue_Now <= ((-1) * ZeroPWM + abs(Step_For_Move)) ) )  // (X >= -30 & X <= -25 )
+      SpeedValue_Now = ZeroPWM;
+    // FINISHER
+    if (SpeedValue_Now >= Max_SpeedValue && SpeedValue_Now <= ( Max_SpeedValue + abs(Step_For_Move) )) // ==Wished_Speed
+    {
+      SpeedValue_Now = Max_SpeedValue;
+      Step_For_Move = 0;  //command complete
+      //PC_Debug.println("Max Speed RIGHT NOW! LvL UP! ");
+    }
+    //Debug
+    PC_Debug.print("(Grow) Speed == ");
+    PC_Debug.println(SpeedValue_Now);
+    PC_Debug.println("---------------");
+  }
+  //Backward
+  if (instruction == Backward)
+  {
+    if (SpeedValue_Now == Min_SpeedValue)
+    {
+      //PC_Debug.println("Min Speed is reached! (already)");
+      Step_For_Move = 0; // pull to 255 (Max_SpeedValue)
+    }
+    if (SpeedValue_Now > Min_SpeedValue && SpeedValue_Now <= Max_SpeedValue)
+    {
+      Step_For_Move = -4;  // -1 - FOR TESTS , -7 - for real fights
+    }
+    //Teleport
+    SpeedValue_Now = SpeedValue_Now + Step_For_Move;
+    if ( (SpeedValue_Now <= ZeroPWM) & (SpeedValue_Now >= ZeroPWM - abs(Step_For_Move) ) ) // == 30 |  ( X <= 30 & X >= 25)
+      SpeedValue_Now = ZeroPWM * (-1);
+    // FINISHER
+    if (SpeedValue_Now <= Min_SpeedValue)
+    {
+      SpeedValue_Now = Min_SpeedValue;
+      Step_For_Move = 0;  // command complete
+      //PC_Debug.println("We Reversed");
+    }
+    //Debug
+    PC_Debug.print("(Drop) Speed == ");
+    PC_Debug.println(SpeedValue_Now);
+  }
+  Execute_The_Command(SpeedValue_Now);
+  return;
+}
+
+void setBatteryCharge_Leds(int ChargeFromADC)
+{
+  //GOTO
+  //ПЕРЕСЧИТАЙ ЗНАЧЕНИЯ ПОД РЕАЛИИ
+  //  int percent_ADC = map(ChargeFromADC, 0 , 1023, 0, 100);
+
+  if (ChargeFromADC >= 0 && ChargeFromADC < 573)  // [0 - 22) V
+  {
+    digitalWrite(Red_Led_Battery_lvl, LOW);
+    digitalWrite(Yellow_Led_Battery_lvl, LOW);
+    digitalWrite(Green_Led_Battery_lvl, LOW);
+    //SetAlarm
+    Low_Battery = true;
+  }
+  if (ChargeFromADC >= 573 && ChargeFromADC < 600)  // [22 - 23) V
+  {
+    digitalWrite(Red_Led_Battery_lvl, HIGH);
+    digitalWrite(Yellow_Led_Battery_lvl, LOW);
+    digitalWrite(Green_Led_Battery_lvl, LOW);
+    if (Low_Battery == true)
+    {
+      Low_Battery = false;
+    }
+  }
+  if (ChargeFromADC >= 600 && ChargeFromADC < 627)   // [23 - 24) V
+  {
+    digitalWrite(Red_Led_Battery_lvl, HIGH);
+    digitalWrite(Yellow_Led_Battery_lvl, HIGH);
+    digitalWrite(Green_Led_Battery_lvl, LOW);
+    if (Low_Battery == true)
+    {
+      Low_Battery = false;
+    }
+  }
+  if (ChargeFromADC >= 627 && ChargeFromADC <= 1023)   // [24- 40.1] V, but in real life [24 - 30] V  {{ (627 - ~ 800] }}
+  {
+    digitalWrite(Red_Led_Battery_lvl, HIGH);
+    digitalWrite(Yellow_Led_Battery_lvl, HIGH);
+    digitalWrite(Green_Led_Battery_lvl, HIGH);
+    PC_Debug.println(F("Full_Charge")); // DELETE THIS
+    if (Low_Battery == true)
+    {
+      Low_Battery = false;
+    }
+  }
+  return;
+}
+
+// input command packet
+void onPacketReceived(const uint8_t* buffer, size_t size)
+{
+  if (WireConnectionFlag_RX != true)
+  {
+    PC_Debug.println("Wrong Handler");
+    return;
+  }
+  PC_Debug.println("TX Packet is Read");
+  uint8_t tempBuffer[size];
+  // Copy the packet into our temporary buffer.
+  memcpy(tempBuffer, buffer, size);
+  PC_Debug.println("Buffer:");
+  for (unsigned int i = 0 ; i < size ; i++)
+  {
+    PC_Debug.print("[");
+    PC_Debug.print(i);
+    PC_Debug.print("]=");
+    PC_Debug.print(tempBuffer[i]);
+    PC_Debug.print("; ");
+    if ( size >= 2)
+    {
+      if (i == 0)
+      {
+        CounterOfPacketsFromTx = tempBuffer[i];
+      }
+      if (i == 1)
+      {
+        if (tempBuffer[i] == Stop || tempBuffer[i] == Forward || tempBuffer[i] == Backward)
+        {
+          InputValue = tempBuffer[i];
+          Reset_Error_Timer_And_Check_WDT();
+          wrong_command = false;
+        }
+        else
+        {
+          PC_Debug.println("wrong command");
+          InputValue = Stop;
+          wrong_command = true;
+        }
+      }
+
+    }
+  }
+
+  PC_Debug.println("");
+
+  //GOTO обработку Буст команды и аварийного стопа.
+  //  PC_Debug.println("");
+  //  InputValue = tempBuffer[1];  // 1ый( второй по смыслу) байт наша команда (куда ехать)
+  //  if (tempBuffer[3] == EmergencyStopCode)
+  //  {
+  //    InputValue = Stop;
+  //    Command_To_Motor(InputValue);
+  //    Release_The_Brakes = true;
+  //    Release_The_Brakes = false;
+  //  }
+  //  if (tempBuffer[3] == BOOST_Code_ON)
+  //  {
+  //    //GOTO
+  //    BOOST_ON();
+  //  }
+  //  if (tempBuffer[3] == BOOST_Code_OFF)
+  //  {
+  //    //GOTO
+  //    BOOST_OFF();
+  //  }
+  //  Release_The_Brakes = false;
+  //  //  Counter_From_RC = tempBuffer[0];
+  //  //  RX_counter++;
+  delay(10);
+  Packet_Received_Flag = true;
+  return;
+}
+
+// goto (x5 read / 5)
+// 4 analog reads - 8 value for telemetry
+void ADCread() {
+  int C1 = 0;
+  int C2 = 0;
+  int S1 = 0;
+  int S2 = 0;
+  int Bat = 0;
+
+  for (int i = 0; i < 5 ; i++)
+  {
+    C1 = analogRead(ADCpin_Current1) + C1;
+    C2 = analogRead(ADCpin_Current2) + C2;
+    S2 = analogRead(ADCpin_Speed2)   + S2;
+    S1 = analogRead(ADCpin_Speed1)   + S1;
+    Bat = analogRead(ADCpin_BatteryLvL) + Bat;
+  }
+
+  Current_1 = C1 / 5;
+  Current_2 = C2 / 5;
+  Speed_2 = S2 / 5;
+  Speed_1 = S1 / 5;
+  BatteryCharge = Bat / 5;
+  PC_Debug.print("BatteryCharge-");
+  PC_Debug.println(BatteryCharge);
+  //
+  //  Current_1 = analogRead(ADCpin_Current1);
+  //  Current_2 = analogRead(ADCpin_Current2);
+  //  Speed_2 = analogRead(ADCpin_Speed2);
+  //  Speed_1 = analogRead(ADCpin_Speed1);
+  //  BatteryCharge = analogRead(ADCpin_BatteryLvL);
+  return;
+}
+
+void Set_SWITCHER_PIN(bool WireFlag)
+{
+  PC_Debug.print("WireFlag =>");
+  PC_Debug.println(WireFlag);
+  if (WireFlag == true)
+  {
+    digitalWrite(SWITCHER_PIN, LOW); // inverted COM(4) <-> NC (3)
+    PC_Debug.println("Radio_Led LOW");
+    delay(5);
+  }
+  if (WireFlag == false)
+  {
+    digitalWrite(SWITCHER_PIN, HIGH); // inverted D3A/D6A COM(4) <-> NO (1)
+    PC_Debug.println("Radio_Led HIGH");
+    delay(5);
+  }
+  return;
+}
+
+// SETUP function
 void setup()
 {
   //Analog Pins setup
@@ -269,6 +806,7 @@ void setup()
   //  delay(500);  //Задержка не обязательна и вставлена для удобства работы с терминальной программой.
 }
 
+// Main function
 void loop()
 {
   //  MBee_Serial.println("MBEE_loop _ x");
@@ -351,7 +889,6 @@ void loop()
           Reset_Error_Timer_And_Check_WDT();
           Alarm_OFF();
         }
-
 
         //        Release_The_Brakes = false;
         //        if (rx.getData()[3] == EmergencyStopCode && WireConnectionFlag_RX == false) //52
@@ -477,622 +1014,70 @@ void loop()
   return;
 }
 
-// input command packet
-void onPacketReceived(const uint8_t* buffer, size_t size)
-{
-  if (WireConnectionFlag_RX != true)
-  {
-    PC_Debug.println("Wrong Handler");
-    return;
-  }
-  PC_Debug.println("TX Packet is Read");
-  uint8_t tempBuffer[size];
-  // Copy the packet into our temporary buffer.
-  memcpy(tempBuffer, buffer, size);
-  PC_Debug.println("Buffer:");
-  for (unsigned int i = 0 ; i < size ; i++)
-  {
-    PC_Debug.print("[");
-    PC_Debug.print(i);
-    PC_Debug.print("]=");
-    PC_Debug.print(tempBuffer[i]);
-    PC_Debug.print("; ");
-    if ( size >= 2)
-    {
-      if (i == 0)
-      {
-        CounterOfPacketsFromTx = tempBuffer[i];
-      }
-      if (i == 1)
-      {
-        if (tempBuffer[i] == Stop || tempBuffer[i] == Forward || tempBuffer[i] == Backward)
-        {
-          InputValue = tempBuffer[i];
-          Reset_Error_Timer_And_Check_WDT();
-          wrong_command = false;
-        }
-        else
-        {
-          PC_Debug.println("wrong command");
-          InputValue = Stop;
-          wrong_command = true;
-        }
-      }
+// ///////////////////////////////////////////////////////////////
+// // BOOST PART
+// void setDefault_parameters_For_Mbee()
+// {
 
-    }
-  }
+//   return;
+// }
 
-  PC_Debug.println("");
+// //TX_Power_Level
+// bool setDefault_TX_Power_Level()  //
+// {
+//   /*
+//     1) check connect to Mbee
+//     2) if YES -> at pl 0x1F (11111 or 31) ~14dbm
+//       if NO  -> return 1;
+//     3) catch "OK"
+//     4) if YES -> at ac
+//       if NO  ->
+//     5) catch "OK"
+//     6) at pl
+//     8) catch "0x1F" or 11111 or 31
+//     7) if YES -> finish + return 0;
+//       if NO  -> return 1
+//   */
 
-  //GOTO обработку Буст команды и аварийного стопа.
-  //  PC_Debug.println("");
-  //  InputValue = tempBuffer[1];  // 1ый( второй по смыслу) байт наша команда (куда ехать)
-  //  if (tempBuffer[3] == EmergencyStopCode)
-  //  {
-  //    InputValue = Stop;
-  //    Command_To_Motor(InputValue);
-  //    Release_The_Brakes = true;
-  //    Release_The_Brakes = false;
-  //  }
-  //  if (tempBuffer[3] == BOOST_Code_ON)
-  //  {
-  //    //GOTO
-  //    BOOST_ON();
-  //  }
-  //  if (tempBuffer[3] == BOOST_Code_OFF)
-  //  {
-  //    //GOTO
-  //    BOOST_OFF();
-  //  }
-  //  Release_The_Brakes = false;
-  //  //  Counter_From_RC = tempBuffer[0];
-  //  //  RX_counter++;
-  delay(10);
-  Packet_Received_Flag = true;
-  return;
-}
+//   delay(1);
+//   return 0;
+// }
 
-void Refresh_WireConnectionFlag_RX()
-{
-  PC_Debug.println(F("Refresh_WireConnectionFlag_TX!"));
-  bool First_WireConnection_Check = digitalRead(Wire_Connection_Check_Pin);
-  if (WireConnectionFlag_RX != First_WireConnection_Check)
-  {
-    delay(5);
-    bool Second_WireConnection_Check = digitalRead(Wire_Connection_Check_Pin);
-    if (Second_WireConnection_Check == First_WireConnection_Check)
-    {
-      if (Second_WireConnection_Check == true) // WIRE ON
-      {
-        PC_Debug.println("-|- Change to -> Wire connect");
-        WireConnectionFlag_RX = true;
-      }
-      else                                      // WIRE OFF
-      {
-        PC_Debug.println("-))  ((- Change to -> WireLESS connect");
-        WireConnectionFlag_RX = false;
-      }
-    }
-  }
-  return;
-}
+// void BOOST_ON()
+// {
+//   // Create CODE
+//   /*
+//     1) Check connect with Mbee
+//     2) if YES -> at pl 0x81 /( 10000001 or 129 ) ~27 dbm for Mbee 2.0
+//       if NO -> send telemetry BOOST_ON_Flag == false;
+//     3) Catch answer like "OK"
+//     4)  if YES -> at ac + wait ( delay(10?) )//write EEPROM
+//        if NO -> send telemetry BOOST_ON_Flag == false;
+//     5) check like "OK"
+//     6)  if YES -> finish this function + return;
+//        if NO  -> send telemetry BOOST_ON_Flag == false;
+//   */
 
-void Set_SWITCHER_PIN(bool WireFlag)
-{
-  PC_Debug.print("WireFlag =>");
-  PC_Debug.println(WireFlag);
-  if (WireFlag == true)
-  {
-    digitalWrite(SWITCHER_PIN, LOW); // inverted COM(4) <-> NC (3)
-    PC_Debug.println("Radio_Led LOW");
-    delay(5);
-  }
-  if (WireFlag == false)
-  {
-    digitalWrite(SWITCHER_PIN, HIGH); // inverted D3A/D6A COM(4) <-> NO (1)
-    PC_Debug.println("Radio_Led HIGH");
-    delay(5);
-  }
-  return;
-}
+//   delay(1);
+//   return;
+// }
 
-void Send_Telemetry( bool WireFlag_RX )
-{
+// void BOOST_OFF()
+// {
+//   // Create CODE
+//   /*
+//     1) Check connect with Mbee
+//     2) if YES -> at pl 0x1F /( 11111 or 31 ) ~14 dbm for Mbee 2.0
+//        if NO -> send telemetry BOOST_ON_Flag == false;
+//     3) Catch answer like "OK"
+//     4)  if YES -> at ac + wait ( delay(10?) )//write EEPROM
+//        if NO -> send telemetry BOOST_ON_Flag == false;
+//     5) check like "OK"
+//     6)  if YES -> finish this function + return;
+//        if NO  -> send telemetry BOOST_ON_Flag == false;
+//   */
 
-  if (WireFlag_RX == true)
-  {
-    PC_Debug.println("Wire Connect...wait");
-    // No send!
-    WireSerial.send(testArray, sizeof(testArray) / sizeof(testArray[0]) );
-    delay(50);
-  }
-  else
-  {
-    mbee.send(tx);
-    PC_Debug.print("Current_1 ==");
-    PC_Debug.println(Current_1);
-    PC_Debug.print("Speed_1 ==");
-    PC_Debug.println(Speed_1);
-    PC_Debug.print("Current_2 ==");
-    PC_Debug.println(Current_2);
-    PC_Debug.print("Speed_2 ==");
-    PC_Debug.println(Speed_2);
-    PC_Debug.println("RX SEND telemetry.");
-    //  if (tx.getFrameId()) //Проверяем, не заблокировано ли локальное подтверждение отправки.
-    //    getLocalResponse(50);
-    //  if ((tx.getFrameId() == 0) || (txStatus.isSuccess() && tx.getSleepingDevice() == false)) //Ждем ответного пакета от удаленного модема только если локальный ответ выключен или пакет отправлен в эфир и не предназначается спящему модему.
-    //    getRemoteResponse(5);
-    delay(50);
-    return;
-  }
-}
+//   delay(2);
+//   return;
+// }
 
-void Command_To_Motor(int instruction)
-{
-  if (instruction == Corrupted_Command)
-  { //GOTO
-    // NEED ADD REACTION On "ERROR_VALUE"
-    PC_Debug.println(F("Corrupted_Command"));
-  }
-  //KURKUMA
-  if ( (instruction == Forward & SpeedValue_Now < ZeroPWM ) | (instruction == Backward & SpeedValue_Now > ZeroPWM))
-  {
-    instruction = Stop;
-    SuddenReverse = true;
-    PC_Debug.println("Reverse_detected ");
-    PC_Debug.print("instruction - ");
-    PC_Debug.println(instruction);
-    //    delay(3000);
-  }
-  if (instruction == Stop)
-  {
-    if (SpeedValue_Now == ZeroPWM)
-    {
-      Step_For_Move = 0; // command already complete
-    }
-
-    if (SpeedValue_Now > ZeroPWM || SpeedValue_Now < -ZeroPWM )
-    {
-      Step_For_Move = 0; // pull to zero // 1 - FOR TESTS , 7 - for real fights
-      SpeedValue_Now = ZeroPWM;
-    }
-
-    //    if (SpeedValue_Now > ZeroPWM)
-    //    {
-    //      Step_For_Move = -4; // pull to zero // 1 - FOR TESTS , 7 - for real fights
-    //    }
-    //    if (SpeedValue_Now < ZeroPWM)
-    //    {
-    //      Step_For_Move = 4; // pull to zero // 1 - FOR TESTS , 7 - for real fights
-    //    }
-
-    //Calculate
-    SpeedValue_Now = SpeedValue_Now + Step_For_Move;
-    //Teleport
-    if ( ( (SpeedValue_Now <= ZeroPWM) & (SpeedValue_Now >= ZeroPWM - abs(Step_For_Move)) )                       //  (X <= 30) & (X >= 25)
-         | ( (SpeedValue_Now >= (-1) * ZeroPWM) & (SpeedValue_Now <= ( (-1) * ZeroPWM + abs(Step_For_Move)) ) ) ) // ( X >= -30) & ( X <= -25 )
-    {
-      SpeedValue_Now = ZeroPWM;
-      Step_For_Move = 0;  // command complete
-      //PC_Debug.println("STOP NOW");
-    }
-    //Debug
-    PC_Debug.print("(Stopping)Speed == ");
-    PC_Debug.println(SpeedValue_Now);
-    PC_Debug.println("---------------");
-  }
-  if (instruction == Forward)
-  {
-    if (SpeedValue_Now == Max_SpeedValue) // check for Wished_Speed
-    {
-      //PC_Debug.println("Max Speed is reached! (already)");
-      Step_For_Move = 0;
-    }
-    if (SpeedValue_Now >= Min_SpeedValue && SpeedValue_Now < Max_SpeedValue)
-    {
-      Step_For_Move = 4; //pull to 225 (Max_SpeedValue)
-    }
-    SpeedValue_Now = SpeedValue_Now + Step_For_Move;  // increment or decrement PWM
-    //Teleport
-    if (SpeedValue_Now >= ZeroPWM * (-1) & (SpeedValue_Now <= ((-1) * ZeroPWM + abs(Step_For_Move)) ) )  // (X >= -30 & X <= -25 )
-      SpeedValue_Now = ZeroPWM;
-    // FINISHER
-    if (SpeedValue_Now >= Max_SpeedValue & SpeedValue_Now <= ( Max_SpeedValue + abs(Step_For_Move) )) // ==Wished_Speed
-    {
-      SpeedValue_Now = Max_SpeedValue;
-      Step_For_Move = 0;  //command complete
-      //PC_Debug.println("Max Speed RIGHT NOW! LvL UP! ");
-    }
-    //Debug
-    PC_Debug.print("(Grow) Speed == ");
-    PC_Debug.println(SpeedValue_Now);
-    PC_Debug.println("---------------");
-  }
-  //Backward
-  if (instruction == Backward)
-  {
-    if (SpeedValue_Now == Min_SpeedValue)
-    {
-      //PC_Debug.println("Min Speed is reached! (already)");
-      Step_For_Move = 0; // pull to 255 (Max_SpeedValue)
-    }
-    if (SpeedValue_Now > Min_SpeedValue && SpeedValue_Now <= Max_SpeedValue)
-    {
-      Step_For_Move = -4;  // -1 - FOR TESTS , -7 - for real fights
-    }
-    //Teleport
-    SpeedValue_Now = SpeedValue_Now + Step_For_Move;
-    if ( (SpeedValue_Now <= ZeroPWM) & (SpeedValue_Now >= ZeroPWM - abs(Step_For_Move) ) ) // == 30 |  ( X <= 30 & X >= 25)
-      SpeedValue_Now = ZeroPWM * (-1);
-    // FINISHER
-    if (SpeedValue_Now <= Min_SpeedValue)
-    {
-      SpeedValue_Now = Min_SpeedValue;
-      Step_For_Move = 0;  // command complete
-      //PC_Debug.println("We Reversed");
-    }
-    //Debug
-    PC_Debug.print("(Drop) Speed == ");
-    PC_Debug.println(SpeedValue_Now);
-  }
-  Execute_The_Command(SpeedValue_Now);
-  return;
-}
-
-void Execute_The_Command(int Speed)
-{
-  if (Speed >= Min_SpeedValue & Speed <= Max_SpeedValue)
-  {
-    if (Speed > ZeroPWM) //F
-    {
-      digitalWrite(Direction_Of_Move, HIGH);
-      digitalWrite(Permission_Of_Move, HIGH);
-      analogWrite(PWM_Pin, Speed);
-      //Debug
-      PC_Debug.println("FORWARD --->>>>");
-      //digitalWrite(ForwardLed, HIGH);
-      //digitalWrite(BackwardLed, LOW);
-      digitalWrite(BackwardLed, HIGH);
-    }
-    if (Speed < ZeroPWM) //B
-    {
-      digitalWrite(Direction_Of_Move, LOW);
-      digitalWrite(Permission_Of_Move, HIGH);
-      analogWrite(PWM_Pin, abs(Speed)); // since it is less than 0
-      //Debug
-      PC_Debug.println("<<<<--- BACKWARD");
-      //digitalWrite(ForwardLed, LOW);
-      digitalWrite(BackwardLed, HIGH);
-    }
-    if (Speed == ZeroPWM) //S
-    {
-      if (Release_The_Brakes == false)
-      {
-        digitalWrite(Direction_Of_Move, LOW);
-        digitalWrite(Permission_Of_Move, HIGH);  // HIGH for normal braking
-        analogWrite(PWM_Pin, Speed);
-        //Debug
-        //PC_Debug.println("|| STOP ||");
-        //digitalWrite(ForwardLed, LOW);
-        digitalWrite(BackwardLed, LOW);
-      }
-      else
-      {
-        digitalWrite(Direction_Of_Move, LOW);
-        digitalWrite(Permission_Of_Move, LOW);  // LOW EMERGENCY braking ONLY
-        analogWrite(PWM_Pin, Speed);
-        //Debug
-        //PC_Debug.println("|| STOP ||");
-        //digitalWrite(ForwardLed, HIGH);
-        digitalWrite(BackwardLed, HIGH);
-      }
-      if ( SuddenReverse == true);
-      {
-        SuddenReverse = false;
-      }
-    }
-    digitalWrite(ForwardLed, LOW);  // expected data
-  }
-  else
-  {
-    // STOP RIGHT NOW
-    digitalWrite(Direction_Of_Move, LOW);
-    digitalWrite(Permission_Of_Move, LOW);
-    analogWrite(PWM_Pin, ZeroPWM);
-    SpeedValue_Now = ZeroPWM;
-    Step_For_Move = 0;
-    //Debug
-    PC_Debug.print("Error!!! Speed == ");
-    PC_Debug.println(SpeedValue_Now);
-    //    PC_Debug.println("");
-    //    PC_Debug.print("RESET -> Speed Value_Now = ");
-    //    PC_Debug.println(SpeedValue_Now);
-    //    PC_Debug.println("");
-    //      PC_Debug.println("ERROR from Host (Switcher have bugs or lags) , sadness ");
-    //Debug on LEDs
-    digitalWrite(ForwardLed, HIGH);
-    digitalWrite(BackwardLed, HIGH);
-  }
-}
-
-//DEBUG feature
-void Debug_information_About_Rx_Packet()
-{
-  PC_Debug.println("---------------------DEBUG------------------");
-  //Print of Received Packet  Length
-  PC_Debug.print("Packet Length -> ");
-  PC_Debug.println(rx.getPacketLength());
-  //Print of MSB Length
-  PC_Debug.print("MSB Lenght -> ");
-  PC_Debug.println(rx.getMsbLength());
-  //Print of LSB Length
-  PC_Debug.print("LSB Lenght -> ");
-  PC_Debug.println(rx.getLsbLength());
-  //Print of API ID
-  PC_Debug.print("API ID -> ");
-  PC_Debug.println(rx.getApiId());
-  // Print Checksum
-  PC_Debug.print("Checksum == ");
-  PC_Debug.println(rx.getChecksum());
-  // Print Frame Data Length
-  PC_Debug.print("Frame Data Lenght -> ");
-  PC_Debug.println(rx.getFrameDataLength());
-  // Print Data Length
-  PC_Debug.print("Data Length -> ");
-  PC_Debug.println(rx.getDataLength());
-  // Print RSSI
-  PC_Debug.print("RSSI -> ");
-  PC_Debug.println(rx.getRssi());
-
-  PC_Debug.println("---------------------DEBUG------------------");
-}
-
-void Print_All_Array(int8_t Size, boolean WriteEnable)
-{
-  // ALL PACK PRINT!!
-  for (int i = 0 ; i < Size ; i ++ )
-  {
-    //"PRINT"
-    PC_Debug.print("Input testArray[");
-    PC_Debug.print(i);
-    PC_Debug.print("]= ");
-    PC_Debug.println(rx.getData()[i]);
-    //"WRITE"
-    if (WriteEnable == true)
-    {
-      PC_Debug.print(" WRITE inside i -> ");
-      PC_Debug.write(rx.getData()[i]);
-      PC_Debug.println();
-    }
-  }
-}
-
-// not use
-void EmergencyStop()
-{
-  //  cli();
-  // Alarm_ON();
-  // STOP RIGHT NOW
-  SpeedValue_Now = ZeroPWM;
-  Step_For_Move = 0;
-  digitalWrite(Direction_Of_Move, LOW);   // оттормаживаем двигатели. ппадение под собственным весом
-  digitalWrite(Permission_Of_Move, LOW);
-  analogWrite(PWM_Pin, ZeroPWM);
-  //  sei();
-  return;
-}
-
-// goto (x5 read / 5)
-// 4 analog reads - 8 value for telemetry
-void ADCread() {
-  int C1 = 0;
-  int C2 = 0;
-  int S1 = 0;
-  int S2 = 0;
-  int Bat = 0;
-
-  for (int i = 0; i < 5 ; i++)
-  {
-    C1 = analogRead(ADCpin_Current1) + C1;
-    C2 = analogRead(ADCpin_Current2) + C2;
-    S2 = analogRead(ADCpin_Speed2)   + S2;
-    S1 = analogRead(ADCpin_Speed1)   + S1;
-    Bat = analogRead(ADCpin_BatteryLvL) + Bat;
-  }
-
-  Current_1 = C1 / 5;
-  Current_2 = C2 / 5;
-  Speed_2 = S2 / 5;
-  Speed_1 = S1 / 5;
-  BatteryCharge = Bat / 5;
-  PC_Debug.print("BatteryCharge-");
-  PC_Debug.println(BatteryCharge);
-  //
-  //  Current_1 = analogRead(ADCpin_Current1);
-  //  Current_2 = analogRead(ADCpin_Current2);
-  //  Speed_2 = analogRead(ADCpin_Speed2);
-  //  Speed_1 = analogRead(ADCpin_Speed1);
-  //  BatteryCharge = analogRead(ADCpin_BatteryLvL);
-  return;
-}
-
-void setBatteryCharge_Leds(int ChargeFromADC)
-{
-  //GOTO
-  //ПЕРЕСЧИТАЙ ЗНАЧЕНИЯ ПОД РЕАЛИИ
-  //  int percent_ADC = map(ChargeFromADC, 0 , 1023, 0, 100);
-
-  if (ChargeFromADC >= 0 & ChargeFromADC < 573)  // [0 - 22) V
-  {
-    digitalWrite(Red_Led_Battery_lvl, LOW);
-    digitalWrite(Yellow_Led_Battery_lvl, LOW);
-    digitalWrite(Green_Led_Battery_lvl, LOW);
-    //SetAlarm
-    Low_Battery = true;
-  }
-  if (ChargeFromADC >= 573 & ChargeFromADC < 600)  // [22 - 23) V
-  {
-    digitalWrite(Red_Led_Battery_lvl, HIGH);
-    digitalWrite(Yellow_Led_Battery_lvl, LOW);
-    digitalWrite(Green_Led_Battery_lvl, LOW);
-    if (Low_Battery == true)
-    {
-      Low_Battery = false;
-    }
-  }
-  if (ChargeFromADC >= 600 & ChargeFromADC < 627)   // [23 - 24) V
-  {
-    digitalWrite(Red_Led_Battery_lvl, HIGH);
-    digitalWrite(Yellow_Led_Battery_lvl, HIGH);
-    digitalWrite(Green_Led_Battery_lvl, LOW);
-    if (Low_Battery == true)
-    {
-      Low_Battery = false;
-    }
-  }
-  if (ChargeFromADC >= 627 & ChargeFromADC <= 1023)   // [24- 40.1] V, but in real life [24 - 30] V  {{ (627 - ~ 800] }}
-  {
-    digitalWrite(Red_Led_Battery_lvl, HIGH);
-    digitalWrite(Yellow_Led_Battery_lvl, HIGH);
-    digitalWrite(Green_Led_Battery_lvl, HIGH);
-    PC_Debug.println(F("Full_Charge")); // DELETE THIS
-    if (Low_Battery == true)
-    {
-      Low_Battery = false;
-    }
-  }
-  return;
-}
-
-// 0-13 = 14 elements
-void setArrayForTelemetry() {
-  int Direction = 111;
-  if (SpeedValue_Now == 30 || SpeedValue_Now == -30)
-    Direction = 0; //stop
-  if (SpeedValue_Now > 30)
-    Direction = 5; //rush
-  if (SpeedValue_Now < -30)
-    Direction = 2; //back
-  //set values
-  testArray [0] = CounterOfPacketsFromTx;
-  testArray [1] = Speed_1;       // Speed_1L
-  testArray [2] = Speed_1 >> 8;  // Speed_1H
-  testArray [3] = Speed_2;
-  testArray [4] = Speed_2 >> 8;
-  testArray [5] = Current_1;
-  testArray [6] = Current_1 >> 8;
-  testArray [7] = Current_2;
-  testArray [8] = Current_2 >> 8;
-  testArray [9] = BatteryCharge;               // V_Roper L
-  testArray [10] = BatteryCharge >> 8;         // V_Roper_H
-  testArray [11] = abs(SpeedValue_Now); //PWM_value
-  testArray [12] = Direction;      //Direction
-  //  testArray [13] = Direction;
-  return;
-}
-
-void Starting_Command_For_Motors()
-{
-  digitalWrite(Direction_Of_Move, LOW);
-  digitalWrite(Permission_Of_Move, LOW);  // LOW EMERGENCY braking ONLY
-  analogWrite(PWM_Pin, ZeroPWM);
-  //Debug
-  //      PC_Debug.println("|| STOP ||");
-  digitalWrite(ForwardLed, LOW);
-  digitalWrite(BackwardLed, LOW);
-  return;
-}
-
-void Data_Send_To_Processing() {
-  int Garbage = random(-1023, 1023);
-  PC_Debug.print("Speed_1=");
-  PC_Debug.print(Speed_1);
-  PC_Debug.print(" ");
-
-  PC_Debug.print("Speed_2=");
-  PC_Debug.print(Speed_2);
-  PC_Debug.print(" ");
-
-  PC_Debug.print("I_1=");
-  PC_Debug.print(Current_1);
-  PC_Debug.print(" ");
-
-  PC_Debug.print("I_2=");
-  PC_Debug.print(Current_2);
-  PC_Debug.print(" ");
-
-  //  Serial.println(val);
-  PC_Debug.print("Garbage=");
-  PC_Debug.print(Garbage);
-  PC_Debug.print(" ");
-  PC_Debug.println();
-  delay(30);
-  return;
-}
-
-void setDefault_parameters_For_Mbee()
-{
-
-  return;
-}
-
-
-
-//TX_Power_Level
-bool setDefault_TX_Power_Level()  //
-{
-  /*
-    1) check connect to Mbee
-    2) if YES -> at pl 0x1F (11111 or 31) ~14dbm
-      if NO  -> return 1;
-    3) catch "OK"
-    4) if YES -> at ac
-      if NO  ->
-    5) catch "OK"
-    6) at pl
-    8) catch "0x1F" or 11111 or 31
-    7) if YES -> finish + return 0;
-      if NO  -> return 1
-  */
-
-  delay(1);
-  return 0;
-}
-
-void BOOST_ON()
-{
-  // Create CODE
-  /*
-    1) Check connect with Mbee
-    2) if YES -> at pl 0x81 /( 10000001 or 129 ) ~27 dbm for Mbee 2.0
-      if NO -> send telemetry BOOST_ON_Flag == false;
-    3) Catch answer like "OK"
-    4)  if YES -> at ac + wait ( delay(10?) )//write EEPROM
-       if NO -> send telemetry BOOST_ON_Flag == false;
-    5) check like "OK"
-    6)  if YES -> finish this function + return;
-       if NO  -> send telemetry BOOST_ON_Flag == false;
-  */
-
-  delay(1);
-  return;
-}
-
-void BOOST_OFF()
-{
-  // Create CODE
-  /*
-    1) Check connect with Mbee
-    2) if YES -> at pl 0x1F /( 11111 or 31 ) ~14 dbm for Mbee 2.0
-       if NO -> send telemetry BOOST_ON_Flag == false;
-    3) Catch answer like "OK"
-    4)  if YES -> at ac + wait ( delay(10?) )//write EEPROM
-       if NO -> send telemetry BOOST_ON_Flag == false;
-    5) check like "OK"
-    6)  if YES -> finish this function + return;
-       if NO  -> send telemetry BOOST_ON_Flag == false;
-  */
-
-  delay(2);
-  return;
-}
