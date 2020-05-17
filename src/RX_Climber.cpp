@@ -853,7 +853,7 @@ void setup()
 
   //Serials setup
   PC_Debug.begin(57600);
-  MBee_Serial.begin(115200);
+  MBee_Serial.begin(115200);  //115200
   while (!Serial);
   WireSerial.begin(115200);
   WireSerial.setPacketHandler(&onPacketReceived);
